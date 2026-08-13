@@ -1,51 +1,48 @@
+import requests
 import json
 import re
-import requests
-from datetime import datetime
+from datetime import datetime, timedelta
+import os
 
-# 配置指数代码映射 (国证官网全收益点位)
 INDEX_CONFIG = [
     {"code": "480081", "name": "价值100R"},
     {"code": "480080", "name": "成长100R"}
 ]
 
-def fetch_cni_detail(code):
-    """从国证指数官网获取最新详情数据"""
-    # 经过分析，详情页展示的数据是通过 get_index_detail 接口获取的
-    # 但直接请求可能会被拦截，我们需要模拟完整的浏览器头信息
-    url = f"https://www.cnindex.com.cn/api/index/get_index_detail?indexCode={code}"
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-        "Referer": f"https://www.cnindex.com.cn/module/index-detail.html?indexCode={code}",
-        "Accept": "application/json, text/plain, */*",
-        "Host": "www.cnindex.com.cn"
+def fetch_cni_history(code):
+    """从国证指数官方内部 API 获取最近的历史行情数据"""
+    url = "http://hq.cnindex.com.cn/market/market/getIndexDailyDataWithDataFormat"
+    end_str = datetime.now().strftime("%Y-%m-%d")
+    start_str = (datetime.now() - timedelta(days=30)).strftime("%Y-%m-%d")
+    
+    params = {
+        "indexCode": code,
+        "startDate": start_str,
+        "endDate": end_str,
+        "frequency": "day",
     }
+    
     try:
-        # 国证官网 API 比较敏感，我们增加重试机制
-        for _ in range(3):
-            resp = requests.get(url, headers=headers, timeout=20)
-            if resp.status_code == 200:
-                data_json = resp.json()
-                if data_json.get("code") == "200" and data_json.get("data"):
-                    info = data_json["data"]
-                    current_val = float(info.get("indexCurrent"))
-                    trade_date = info.get("tradeDate")
-                    return trade_date, current_val
-            elif resp.status_code == 404:
-                # 尝试备用接口（列表接口）
-                list_url = "https://www.cnindex.com.cn/api/index/get_index_list"
-                list_resp = requests.post(list_url, data={"indexCode": code}, headers=headers, timeout=20)
-                if list_resp.status_code == 200:
-                    list_data = list_resp.json()
-                    if list_data.get("data") and list_data["data"].get("rows"):
-                        row = list_data["data"]["rows"][0]
-                        return row.get("tradeDate"), float(row.get("indexCurrent"))
+        r = requests.get(url, params=params, timeout=15)
+        data = r.json()
+        if data.get("data") and data["data"].get("data"):
+            rows = data["data"]["data"]
+            result = {}
+            for row in rows:
+                date_str = row[0]
+                close_price = float(row[5])
+                result[date_str] = close_price
+            return result
     except Exception as e:
-        print(f"抓取国证指数 {code} 失败: {e}")
-    return None, None
+        print(f"获取指数 {code} 历史行情失败: {e}")
+    return {}
 
 def update_html(file_path):
     print(f"正在处理文件: {file_path}")
+    if not os.path.exists(file_path):
+        print(f"错误：找不到文件 {file_path}")
+        return
+
     with open(file_path, 'r', encoding='utf-8') as f:
         content = f.read()
 
@@ -54,7 +51,12 @@ def update_html(file_path):
         print("错误：在 HTML 中未找到 allData 数据标识")
         return
     
-    all_data = json.loads(match.group(1))
+    try:
+        all_data = json.loads(match.group(1))
+    except Exception as e:
+        print(f"解析 allData JSON 失败: {e}")
+        return
+
     updated_any = False
 
     for item in INDEX_CONFIG:
@@ -62,40 +64,43 @@ def update_html(file_path):
         name = item["name"]
         
         if name not in all_data:
+            print(f"警告：HTML 数据中未找到 {name}")
             continue
             
-        target_date, latest_val = fetch_cni_detail(code)
-        
-        if latest_val and target_date:
-            dates = all_data[name]["dates"]
-            values = all_data[name]["values"]
+        recent_data = fetch_cni_history(code)
+        if not recent_data:
+            print(f"未获取到 {name} ({code}) 的最新数据")
+            continue
             
-            if target_date in dates:
-                idx = dates.index(target_date)
-                if abs(values[idx] - latest_val) > 0.001:
-                    values[idx] = latest_val
+        dates = all_data[name]["dates"]
+        values = all_data[name]["values"]
+        
+        for date_str, price in sorted(recent_data.items(), key=lambda x: x[0]):
+            if date_str in dates:
+                idx = dates.index(date_str)
+                if abs(values[idx] - price) > 0.001:
+                    values[idx] = price
                     updated_any = True
-                    print(f"更新 {name} [{target_date}]: {latest_val}")
+                    print(f"更新已有数据 -> {name} [{date_str}]: {price}")
             else:
-                dates.append(target_date)
-                values.append(latest_val)
-                combined = sorted(zip(dates, values), key=lambda x: x[0])
-                all_data[name]["dates"] = [x[0] for x in combined]
-                all_data[name]["values"] = [x[1] for x in combined]
+                dates.append(date_str)
+                values.append(price)
                 updated_any = True
-                print(f"新增 {name} [{target_date}]: {latest_val}")
+                print(f"新增最新数据 -> {name} [{date_str}]: {price}")
+        
+        combined = sorted(zip(dates, values), key=lambda x: x[0])
+        all_data[name]["dates"] = [x[0] for x in combined]
+        all_data[name]["values"] = [x[1] for x in combined]
 
     if updated_any:
         new_json = json.dumps(all_data, ensure_ascii=False)
         new_content = content.replace(match.group(1), new_json)
         with open(file_path, 'w', encoding='utf-8') as f:
             f.write(new_content)
-        print("✅ HTML 文件数据已成功更新。")
+        print("✅ HTML 文件数据已成功更新并保存。")
     else:
-        print("ℹ️ 未检测到新数据变化。")
+        print("ℹ️ 数据已是最新，未检测到需要更新的内容。")
 
 if __name__ == "__main__":
-    import os
     target_file = "价值成长风格轮动策略.html"
-    if os.path.exists(target_file):
-        update_html(target_file)
+    update_html(target_file)
