@@ -82,7 +82,7 @@ def calculate_regression_channels(data_obj):
     reg_high, high_ret = get_line(high_pts, n_total)
     reg_low, low_ret = get_line(low_pts, n_total)
     
-    # 注入数据到对象
+    # 注入数据到对象，确保字段名与 HTML 匹配
     data_obj["reg_high"] = [round(float(v), 4) for v in reg_high]
     data_obj["reg_low"] = [round(float(v), 4) for v in reg_low]
     data_obj["high_points"] = [[int(p[0]), round(float(p[1]), 4)] for p in high_pts]
@@ -139,7 +139,7 @@ def update_html(file_path):
                     values.append(price)
                     index_updated = True
         
-        # 检查是否需要重算回归 (数据更新或字段缺失)
+        # 检查是否需要重算回归 (数据更新或字段缺失/长度不匹配)
         has_reg = "reg_high" in all_data[name] and len(all_data[name]["reg_high"]) == len(dates)
         if index_updated or not has_reg:
             combined = sorted(zip(dates, values), key=lambda x: x[0])
@@ -194,7 +194,6 @@ def update_html(file_path):
         print(f"ℹ️ {file_path} 已是最新。")
 
 if __name__ == "__main__":
-    # 尝试更新所有可能的 HTML 文件名
-    targets = ["价值成长风格轮动策略.html", "价值成长风格分析工具.html"]
-    for t in targets:
-        update_html(t)
+    # 尝试更新指定的 HTML 文件
+    target_file = "价值成长风格轮动策略.html"
+    update_html(target_file)
