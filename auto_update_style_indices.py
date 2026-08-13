@@ -59,6 +59,7 @@ def update_html(file_path):
 
     updated_any = False
 
+    # 1. 更新基础指数数据
     for item in INDEX_CONFIG:
         code = item["code"]
         name = item["name"]
@@ -92,12 +93,49 @@ def update_html(file_path):
         all_data[name]["dates"] = [x[0] for x in combined]
         all_data[name]["values"] = [x[1] for x in combined]
 
+    # 2. 同步更新 DASHBOARD 比值数据
+    if updated_any and "DASHBOARD" in all_data:
+        print("正在同步更新 DASHBOARD 比值仪表盘数据...")
+        dash = all_data["DASHBOARD"]
+        g_data = all_data["成长100R"]
+        v_data = all_data["价值100R"]
+        
+        # 获取所有日期的并集
+        date_set = set(g_data["dates"]) | set(v_data["dates"])
+        sorted_dates = sorted(list(date_set))
+        
+        g_map = dict(zip(g_data["dates"], g_data["values"]))
+        v_map = dict(zip(v_data["dates"], v_data["values"]))
+        
+        dash["dates"] = sorted_dates
+        dash["growth_values"] = [g_map.get(d) for d in sorted_dates]
+        dash["value_values"] = [v_map.get(d) for d in sorted_dates]
+        
+        # 计算比值 (价值 / 成长)
+        ratios = []
+        for d in sorted_dates:
+            gv = g_map.get(d)
+            vv = v_map.get(d)
+            if gv and vv:
+                ratios.append(round(vv / gv, 4))
+            else:
+                ratios.append(None)
+        
+        dash["ratio"] = ratios
+        
+        # 重新计算比值均值 (基准线)
+        valid_ratios = [r for r in ratios if r is not None]
+        if valid_ratios:
+            dash["ratio_mean"] = round(sum(valid_ratios) / len(valid_ratios), 4)
+            print(f"DASHBOARD 已更新，当前比值均值: {dash['ratio_mean']}")
+
     if updated_any:
+        # 使用 ensure_ascii=False 保持中文不转义，indent=None 压缩体积
         new_json = json.dumps(all_data, ensure_ascii=False)
         new_content = content.replace(match.group(1), new_json)
         with open(file_path, 'w', encoding='utf-8') as f:
             f.write(new_content)
-        print("✅ HTML 文件数据已成功更新并保存。")
+        print("✅ HTML 文件及仪表盘数据已成功更新并保存。")
     else:
         print("ℹ️ 数据已是最新，未检测到需要更新的内容。")
 
