@@ -1,9 +1,13 @@
 import requests
 import json
 import re
+import numpy as np
+import pandas as pd
+from scipy import stats
 from datetime import datetime, timedelta
 import os
 
+# 配置指数代码映射
 INDEX_CONFIG = [
     {"code": "480081", "name": "价值100R"},
     {"code": "480080", "name": "成长100R"}
@@ -13,7 +17,7 @@ def fetch_cni_history(code):
     """从国证指数官方内部 API 获取最近的历史行情数据"""
     url = "http://hq.cnindex.com.cn/market/market/getIndexDailyDataWithDataFormat"
     end_str = datetime.now().strftime("%Y-%m-%d")
-    start_str = (datetime.now() - timedelta(days=30)).strftime("%Y-%m-%d")
+    start_str = (datetime.now() - timedelta(days=60)).strftime("%Y-%m-%d")
     
     params = {
         "indexCode": code,
@@ -37,10 +41,59 @@ def fetch_cni_history(code):
         print(f"获取指数 {code} 历史行情失败: {e}")
     return {}
 
+def find_points(prices, is_high=True, window=120):
+    points = []
+    n = len(prices)
+    for i in range(0, n, window):
+        segment = prices[i:i+window]
+        if not segment: continue
+        val = max(segment) if is_high else min(segment)
+        idx = i + segment.index(val)
+        points.append((idx, np.log(val)))
+    return points
+
+def calculate_regression_channels(data_obj):
+    """为指数计算近10年的对数回归通道"""
+    values = data_obj["values"]
+    prices = np.array(values)
+    n_total = len(prices)
+    
+    # 对数回归通道 (近10年)
+    n_10y = min(n_total, 252 * 10)
+    start_idx = n_total - n_10y
+    
+    prices_10y = values[start_idx:]
+    high_pts = find_points(prices_10y, is_high=True)
+    low_pts = find_points(prices_10y, is_high=False)
+    
+    # 调整点位索引为全局索引
+    high_pts = [(p[0] + start_idx, p[1]) for p in high_pts]
+    low_pts = [(p[0] + start_idx, p[1]) for p in low_pts]
+    
+    def get_line(pts, length):
+        if not pts: return [0]*length, 0
+        x = np.array([p[0] for p in pts])
+        y = np.array([p[1] for p in pts])
+        slope, intercept, _, _, _ = stats.linregress(x, y)
+        line = slope * np.arange(length) + intercept
+        annual_ret = (np.exp(slope * 252) - 1) * 100
+        return line.tolist(), round(float(annual_ret), 2)
+
+    reg_high, high_ret = get_line(high_pts, n_total)
+    reg_low, low_ret = get_line(low_pts, n_total)
+    
+    # 注入数据到对象
+    data_obj["reg_high"] = [round(float(v), 4) for v in reg_high]
+    data_obj["reg_low"] = [round(float(v), 4) for v in reg_low]
+    data_obj["high_points"] = [[int(p[0]), round(float(p[1]), 4)] for p in high_pts]
+    data_obj["low_points"] = [[int(p[0]), round(float(p[1]), 4)] for p in low_pts]
+    data_obj["annual_return_high"] = high_ret
+    data_obj["annual_return_low"] = low_ret
+
 def update_html(file_path):
     print(f"正在处理文件: {file_path}")
     if not os.path.exists(file_path):
-        print(f"错误：找不到文件 {file_path}")
+        print(f"跳过：找不到文件 {file_path}")
         return
 
     with open(file_path, 'r', encoding='utf-8') as f:
@@ -59,42 +112,45 @@ def update_html(file_path):
 
     updated_any = False
 
-    # 1. 更新基础指数数据
+    # 1. 更新基础指数数据并重算回归
     for item in INDEX_CONFIG:
         code = item["code"]
         name = item["name"]
         
         if name not in all_data:
-            print(f"警告：HTML 数据中未找到 {name}，初始化结构...")
-            all_data[name] = {"dates": [], "values": []}
-            
-        recent_data = fetch_cni_history(code)
-        if not recent_data:
-            print(f"未获取到 {name} ({code}) 的最新数据")
+            print(f"警告：HTML 数据中未找到 {name}")
             continue
             
+        recent_data = fetch_cni_history(code)
+        
         dates = all_data[name]["dates"]
         values = all_data[name]["values"]
+        index_updated = False
         
-        for date_str, price in sorted(recent_data.items(), key=lambda x: x[0]):
-            if date_str in dates:
-                idx = dates.index(date_str)
-                if abs(values[idx] - price) > 0.001:
-                    values[idx] = price
-                    updated_any = True
-                    print(f"更新已有数据 -> {name} [{date_str}]: {price}")
-            else:
-                dates.append(date_str)
-                values.append(price)
-                updated_any = True
-                print(f"新增最新数据 -> {name} [{date_str}]: {price}")
+        if recent_data:
+            for date_str, price in sorted(recent_data.items(), key=lambda x: x[0]):
+                if date_str in dates:
+                    idx = dates.index(date_str)
+                    if abs(values[idx] - price) > 0.001:
+                        values[idx] = price
+                        index_updated = True
+                else:
+                    dates.append(date_str)
+                    values.append(price)
+                    index_updated = True
         
-        combined = sorted(zip(dates, values), key=lambda x: x[0])
-        all_data[name]["dates"] = [x[0] for x in combined]
-        all_data[name]["values"] = [x[1] for x in combined]
+        # 检查是否需要重算回归 (数据更新或字段缺失)
+        has_reg = "reg_high" in all_data[name] and len(all_data[name]["reg_high"]) == len(dates)
+        if index_updated or not has_reg:
+            combined = sorted(zip(dates, values), key=lambda x: x[0])
+            all_data[name]["dates"] = [x[0] for x in combined]
+            all_data[name]["values"] = [x[1] for x in combined]
+            
+            print(f"正在为 {name} 重新计算回归通道指标...")
+            calculate_regression_channels(all_data[name])
+            updated_any = True
 
-    # 2. 检查并同步 DASHBOARD 数据
-    # 我们根据当前的指数数据重新计算一个“理想的”DASHBOARD
+    # 2. 同步 DASHBOARD 数据
     g_data = all_data.get("成长100R", {"dates": [], "values": []})
     v_data = all_data.get("价值100R", {"dates": [], "values": []})
     
@@ -123,28 +179,22 @@ def update_html(file_path):
     if valid_ratios:
         new_dash["ratio_mean"] = round(sum(valid_ratios) / len(valid_ratios), 4)
 
-    # 检查 DASHBOARD 是否需要更新
-    if "DASHBOARD" not in all_data:
+    if "DASHBOARD" not in all_data or all_data["DASHBOARD"].get("dates") != new_dash["dates"]:
         all_data["DASHBOARD"] = new_dash
         updated_any = True
-        print("DASHBOARD 模块缺失，已创建。")
-    else:
-        # 比较最后一个日期或数据长度
-        old_dash = all_data["DASHBOARD"]
-        if old_dash.get("dates") != new_dash["dates"] or old_dash.get("ratio") != new_dash["ratio"]:
-            all_data["DASHBOARD"] = new_dash
-            updated_any = True
-            print("DASHBOARD 数据与指数不一致，已同步更新。")
+        print("DASHBOARD 数据已同步更新。")
 
     if updated_any:
         new_json = json.dumps(all_data, ensure_ascii=False)
         new_content = content.replace(match.group(1), new_json)
         with open(file_path, 'w', encoding='utf-8') as f:
             f.write(new_content)
-        print("✅ HTML 文件及仪表盘数据已成功更新并保存。")
+        print(f"✅ {file_path} 及图表指标已成功更新。")
     else:
-        print("ℹ️ 数据已是最新，未检测到需要更新的内容。")
+        print(f"ℹ️ {file_path} 已是最新。")
 
 if __name__ == "__main__":
-    target_file = "价值成长风格轮动策略.html"
-    update_html(target_file)
+    # 尝试更新所有可能的 HTML 文件名
+    targets = ["价值成长风格轮动策略.html", "价值成长风格分析工具.html"]
+    for t in targets:
+        update_html(t)
