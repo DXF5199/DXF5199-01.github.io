@@ -65,8 +65,8 @@ def update_html(file_path):
         name = item["name"]
         
         if name not in all_data:
-            print(f"警告：HTML 数据中未找到 {name}")
-            continue
+            print(f"警告：HTML 数据中未找到 {name}，初始化结构...")
+            all_data[name] = {"dates": [], "values": []}
             
         recent_data = fetch_cni_history(code)
         if not recent_data:
@@ -93,44 +93,50 @@ def update_html(file_path):
         all_data[name]["dates"] = [x[0] for x in combined]
         all_data[name]["values"] = [x[1] for x in combined]
 
-    # 2. 同步更新 DASHBOARD 比值数据
-    if updated_any and "DASHBOARD" in all_data:
-        print("正在同步更新 DASHBOARD 比值仪表盘数据...")
-        dash = all_data["DASHBOARD"]
-        g_data = all_data["成长100R"]
-        v_data = all_data["价值100R"]
-        
-        # 获取所有日期的并集
-        date_set = set(g_data["dates"]) | set(v_data["dates"])
-        sorted_dates = sorted(list(date_set))
-        
-        g_map = dict(zip(g_data["dates"], g_data["values"]))
-        v_map = dict(zip(v_data["dates"], v_data["values"]))
-        
-        dash["dates"] = sorted_dates
-        dash["growth_values"] = [g_map.get(d) for d in sorted_dates]
-        dash["value_values"] = [v_map.get(d) for d in sorted_dates]
-        
-        # 计算比值 (价值 / 成长)
-        ratios = []
-        for d in sorted_dates:
-            gv = g_map.get(d)
-            vv = v_map.get(d)
-            if gv and vv:
-                ratios.append(round(vv / gv, 4))
-            else:
-                ratios.append(None)
-        
-        dash["ratio"] = ratios
-        
-        # 重新计算比值均值 (基准线)
-        valid_ratios = [r for r in ratios if r is not None]
-        if valid_ratios:
-            dash["ratio_mean"] = round(sum(valid_ratios) / len(valid_ratios), 4)
-            print(f"DASHBOARD 已更新，当前比值均值: {dash['ratio_mean']}")
+    # 2. 检查并同步 DASHBOARD 数据
+    # 我们根据当前的指数数据重新计算一个“理想的”DASHBOARD
+    g_data = all_data.get("成长100R", {"dates": [], "values": []})
+    v_data = all_data.get("价值100R", {"dates": [], "values": []})
+    
+    date_set = set(g_data["dates"]) | set(v_data["dates"])
+    sorted_dates = sorted(list(date_set))
+    
+    g_map = dict(zip(g_data["dates"], g_data["values"]))
+    v_map = dict(zip(v_data["dates"], v_data["values"]))
+    
+    new_dash = {
+        "dates": sorted_dates,
+        "growth_values": [g_map.get(d) for d in sorted_dates],
+        "value_values": [v_map.get(d) for d in sorted_dates],
+        "ratio": []
+    }
+    
+    for d in sorted_dates:
+        gv = g_map.get(d)
+        vv = v_map.get(d)
+        if gv and vv:
+            new_dash["ratio"].append(round(vv / gv, 4))
+        else:
+            new_dash["ratio"].append(None)
+    
+    valid_ratios = [r for r in new_dash["ratio"] if r is not None]
+    if valid_ratios:
+        new_dash["ratio_mean"] = round(sum(valid_ratios) / len(valid_ratios), 4)
+
+    # 检查 DASHBOARD 是否需要更新
+    if "DASHBOARD" not in all_data:
+        all_data["DASHBOARD"] = new_dash
+        updated_any = True
+        print("DASHBOARD 模块缺失，已创建。")
+    else:
+        # 比较最后一个日期或数据长度
+        old_dash = all_data["DASHBOARD"]
+        if old_dash.get("dates") != new_dash["dates"] or old_dash.get("ratio") != new_dash["ratio"]:
+            all_data["DASHBOARD"] = new_dash
+            updated_any = True
+            print("DASHBOARD 数据与指数不一致，已同步更新。")
 
     if updated_any:
-        # 使用 ensure_ascii=False 保持中文不转义，indent=None 压缩体积
         new_json = json.dumps(all_data, ensure_ascii=False)
         new_content = content.replace(match.group(1), new_json)
         with open(file_path, 'w', encoding='utf-8') as f:
