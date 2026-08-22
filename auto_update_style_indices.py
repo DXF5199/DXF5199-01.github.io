@@ -58,37 +58,39 @@ def calculate_regression_channels(data_obj):
     prices = np.array(values)
     n_total = len(prices)
     
-    # 对数回归通道 (近10年)
-    n_10y = min(n_total, 252 * 10)
-    start_idx = n_total - n_10y
-    
+    # 对数回归通道：严格使用最新交易日向前滚动10个日历年的样本。
+    date_index = pd.to_datetime(data_obj["dates"])
+    cutoff_date = date_index[-1] - pd.DateOffset(years=10)
+    valid_indices = np.flatnonzero(date_index >= cutoff_date)
+    start_idx = int(valid_indices[0]) if len(valid_indices) else 0
     prices_10y = values[start_idx:]
-    high_pts = find_points(prices_10y, is_high=True)
-    low_pts = find_points(prices_10y, is_high=False)
-    
-    # 调整点位索引为全局索引
-    high_pts = [(p[0] + start_idx, p[1]) for p in high_pts]
-    low_pts = [(p[0] + start_idx, p[1]) for p in low_pts]
-    
-    def get_line(pts, length):
-        if not pts: return [0]*length, 0
+    n_10y = len(prices_10y)
+
+    high_pts_local = find_points(prices_10y, is_high=True)
+    low_pts_local = find_points(prices_10y, is_high=False)
+
+    def get_line(pts):
         x = np.array([p[0] for p in pts])
         y = np.array([p[1] for p in pts])
         slope, intercept, _, _, _ = stats.linregress(x, y)
-        line = slope * np.arange(length) + intercept
+        line = slope * np.arange(n_10y) + intercept
         annual_ret = (np.exp(slope * 252) - 1) * 100
-        return line.tolist(), round(float(annual_ret), 2)
+        return line, round(float(annual_ret), 2)
 
-    reg_high, high_ret = get_line(high_pts, n_total)
-    reg_low, low_ret = get_line(low_pts, n_total)
-    
-    # 注入数据到对象，确保字段名与 HTML 匹配
-    data_obj["reg_high"] = [round(float(v), 4) for v in reg_high]
-    data_obj["reg_low"] = [round(float(v), 4) for v in reg_low]
-    data_obj["high_points"] = [[int(p[0]), round(float(p[1]), 4)] for p in high_pts]
-    data_obj["low_points"] = [[int(p[0]), round(float(p[1]), 4)] for p in low_pts]
+    reg_high_10y, high_ret = get_line(high_pts_local)
+    reg_low_10y, low_ret = get_line(low_pts_local)
+
+    # 10年窗口外用None占位，避免绘制不属于当前拟合样本的通道线。
+    prefix = [None] * start_idx
+    data_obj["reg_high"] = prefix + [round(float(v), 4) for v in reg_high_10y]
+    data_obj["reg_low"] = prefix + [round(float(v), 4) for v in reg_low_10y]
+    data_obj["high_points"] = [[int(p[0] + start_idx), round(float(p[1]), 4)] for p in high_pts_local]
+    data_obj["low_points"] = [[int(p[0] + start_idx), round(float(p[1]), 4)] for p in low_pts_local]
     data_obj["annual_return_high"] = high_ret
     data_obj["annual_return_low"] = low_ret
+    data_obj["regression_start_index"] = start_idx
+    data_obj["regression_start_date"] = data_obj["dates"][start_idx]
+    data_obj["regression_window_years"] = 10
 
 def update_html(file_path):
     print(f"正在处理文件: {file_path}")
@@ -140,7 +142,12 @@ def update_html(file_path):
                     index_updated = True
         
         # 检查是否需要重算回归 (数据更新或字段缺失/长度不匹配)
-        has_reg = "reg_high" in all_data[name] and len(all_data[name]["reg_high"]) == len(dates)
+        has_reg = (
+            "reg_high" in all_data[name]
+            and len(all_data[name]["reg_high"]) == len(dates)
+            and "regression_start_index" in all_data[name]
+            and all_data[name].get("regression_window_years") == 10
+        )
         if index_updated or not has_reg:
             combined = sorted(zip(dates, values), key=lambda x: x[0])
             all_data[name]["dates"] = [x[0] for x in combined]
